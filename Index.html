@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EPUB Translator</title>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#1f2937;background:#f6f7fb}
+*{box-sizing:border-box} body{margin:0;padding:22px}.app{max-width:820px;margin:auto;background:white;padding:24px;border-radius:20px;box-shadow:0 10px 35px #0001}
+h1{margin:0 0 6px;font-size:26px}.sub{color:#6b7280;margin-bottom:22px}
+.drop{border:2px dashed #aab2c0;border-radius:16px;padding:34px;text-align:center;cursor:pointer;background:#fafbff}
+.drop.drag{border-color:#111827;background:#f0f3f8}.file{margin-top:10px;font-weight:600}
+.row{display:flex;gap:12px;flex-wrap:wrap;margin-top:16px}.field{flex:1;min-width:210px}
+label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}select,input{width:100%;padding:11px;border:1px solid #d6dae2;border-radius:10px;background:white}
+button{border:0;border-radius:11px;padding:11px 16px;font-weight:700;cursor:pointer}.primary{background:#111827;color:white}.secondary{background:#e9edf3}.danger{background:#fee2e2}
+.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}
+.progress{height:14px;background:#e9edf3;border-radius:99px;overflow:hidden;margin-top:22px}.bar{height:100%;width:0;background:#111827;transition:.25s}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}.stat{background:#f7f8fb;border-radius:10px;padding:10px}.k{font-size:11px;color:#6b7280}.v{font-weight:800;margin-top:3px}
+.log{margin-top:16px;background:#0b1020;color:#dce5ff;padding:13px;border-radius:12px;height:150px;overflow:auto;font:12px ui-monospace,monospace;white-space:pre-wrap}
+.note{font-size:12px;color:#6b7280;margin-top:12px}@media(max-width:600px){.stats{grid-template-columns:1fr 1fr}.app{padding:17px}body{padding:10px}}
+</style>
+</head>
+<body><main class="app">
+<h1>EPUB Translator</h1>
+<div class="sub">EPUB → Bahasa Indonesia • progress, ETA, pause/resume, autosave</div>
+
+<div id="drop" class="drop">
+  <strong>Tarik EPUB ke sini</strong><br>atau ketuk untuk pilih file
+  <input id="file" type="file" accept=".epub,application/epub+zip" hidden>
+  <div id="filename" class="file"></div>
+</div>
+
+<div class="row">
+ <div class="field"><label>Gaya terjemahan</label><select id="style"><option value="natural">Natural — enak dibaca</option><option value="literal">Literal — lebih dekat teks asli</option></select></div>
+ <div class="field"><label>Ukuran batch</label><select id="batch"><option>8</option><option selected>15</option><option>25</option></select></div>
+</div>
+<div class="row">
+ <div class="field"><label>Endpoint penerjemah (opsional)</label><input id="endpoint" placeholder="Backend/API proxy milik lu"></div>
+</div>
+<div class="actions">
+ <button class="primary" id="start">Mulai</button>
+ <button class="secondary" id="pause">Pause</button>
+ <button class="secondary" id="resume">Resume</button>
+ <button class="secondary" id="save">Simpan EPUB</button>
+ <button class="danger" id="reset">Reset</button>
+</div>
+
+<div class="progress"><div id="bar" class="bar"></div></div>
+<div class="stats">
+ <div class="stat"><div class="k">PROGRESS</div><div id="pct" class="v">0%</div></div>
+ <div class="stat"><div class="k">BAGIAN</div><div id="count" class="v">0 / 0</div></div>
+ <div class="stat"><div class="k">KECEPATAN</div><div id="speed" class="v">—</div></div>
+ <div class="stat"><div class="k">ESTIMASI</div><div id="eta" class="v">—</div></div>
+</div>
+<div id="log" class="log">Siap. Masukkan file EPUB.</div>
+<div class="note">Catatan: GitHub Pages hanya menjalankan kode di browser. Untuk terjemahan AI sungguhan, jangan taruh API key rahasia langsung di HTML publik; gunakan backend/proxy. Tanpa endpoint, versi ini menjalankan mode demo agar alur EPUB, progress, ETA, pause/resume, dan export bisa dites.</div>
+</main>
+<script>
+let zip=null, originalName="", jobs=[], done=0, paused=false, startedAt=0, active=false;
+const $=id=>document.getElementById(id), log=t=>{$("log").textContent += "\n"+t;$("log").scrollTop=$("log").scrollHeight};
+function fmt(sec){if(!isFinite(sec)||sec<0)return "—";sec=Math.round(sec);if(sec<60)return sec+" dtk";let m=Math.floor(sec/60),s=sec%60;if(m<60)return m+" mnt "+s+" dtk";let h=Math.floor(m/60);return h+" jam "+(m%60)+" mnt"}
+function update(){
+ let total=jobs.length,p=total?done/total:0;$("bar").style.width=(p*100)+"%";$("pct").textContent=Math.round(p*100)+"%";$("count").textContent=done+" / "+total;
+ let elapsed=(Date.now()-startedAt)/1000, rate=done&&elapsed>0?done/elapsed:0;$("speed").textContent=rate?(rate*60).toFixed(1)+" bagian/mnt":"—";$("eta").textContent=rate?fmt((total-done)/rate):"Mengukur…";
+ localStorage.setItem("epubTranslatorProgress",JSON.stringify({name:originalName,done,total,style:$("style").value}));
+}
+async function loadFile(f){
+ if(!f||!f.name.toLowerCase().endsWith(".epub"))return alert("Pilih file .epub");
+ originalName=f.name; $("filename").textContent=f.name; zip=await JSZip.loadAsync(f); jobs=[];done=0;
+ const names=Object.keys(zip.files).filter(n=>/\.(xhtml|html|htm)$/i.test(n)&&!zip.files[n].dir);
+ for(const name of names){
+   const text=await zip.file(name).async("string");
+   const doc=new DOMParser().parseFromString(text,"text/html");
+   [...doc.body.querySelectorAll("p,li,h1,h2,h3,h4,h5,h6,blockquote")].forEach((el,i)=>{
+     const t=el.textContent.trim(); if(t.length>1)jobs.push({name,index:i});
+   });
+ }
+ $("log").textContent="EPUB dibaca: "+jobs.length+" bagian teks ditemukan.";update();
+}
+async function translateText(text){
+ const ep=$("endpoint").value.trim(), style=$("style").value;
+ if(!ep){ await new Promise(r=>setTimeout(r,120)); return text; } // demo
+ const r=await fetch(ep,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,style,target:"id"})});
+ if(!r.ok)throw new Error("Endpoint error "+r.status);
+ const j=await r.json(); return j.translation||j.text||text;
+}
+async function processAll(){
+ if(!zip||!jobs.length)return alert("Masukkan EPUB dulu.");
+ if(active)return; active=true;paused=false;startedAt=Date.now(); log("Mulai proses…");
+ const byFile={};jobs.forEach(j=>(byFile[j.name]??=[]).push(j));
+ try{
+  for(const [name,list] of Object.entries(byFile)){
+   while(paused)await new Promise(r=>setTimeout(r,250));
+   let src=await zip.file(name).async("string"), doc=new DOMParser().parseFromString(src,"text/html");
+   let els=[...doc.body.querySelectorAll("p,li,h1,h2,h3,h4,h5,h6,blockquote")].filter(e=>e.textContent.trim().length>1);
+   for(let i=0;i<els.length;i++){
+    while(paused)await new Promise(r=>setTimeout(r,250));
+    const old=els[i].textContent.trim(); const tr=await translateText(old);
+    if(tr!==old) els[i].textContent=tr;
+    done++; update();
+   }
+   let out='<!DOCTYPE html>\n'+doc.documentElement.outerHTML;zip.file(name,out);
+  }
+  log("Selesai. Tekan “Simpan EPUB”."); $("eta").textContent="Selesai";
+ }catch(e){log("ERROR: "+e.message);}finally{active=false}
+}
+async function saveEpub(){
+ if(!zip)return alert("Belum ada EPUB.");
+ const blob=await zip.generateAsync({type:"blob",mimeType:"application/epub+zip"});
+ const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=originalName.replace(/\.epub$/i,"")+" - Indonesia.epub";a.click();setTimeout(()=>URL.revokeObjectURL(a.href),3000);
+}
+$("drop").onclick=()=> $("file").click();$("file").onchange=e=>loadFile(e.target.files[0]);
+$("drop").ondragover=e=>{e.preventDefault();$("drop").classList.add("drag")};$("drop").ondragleave=()=> $("drop").classList.remove("drag");
+$("drop").ondrop=e=>{e.preventDefault();$("drop").classList.remove("drag");loadFile(e.dataTransfer.files[0])};
+$("start").onclick=processAll;$("pause").onclick=()=>{paused=true;log("Dijeda.")};$("resume").onclick=()=>{paused=false;log("Dilanjutkan.")};$("save").onclick=saveEpub;
+$("reset").onclick=()=>{localStorage.removeItem("epubTranslatorProgress");location.reload()};
+</script></body></html>
